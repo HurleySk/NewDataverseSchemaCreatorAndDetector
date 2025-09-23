@@ -12,7 +12,7 @@ namespace DataverseSchemaManager.Services
     {
         public void ExportNewSchema(List<SchemaDefinition> schemas, string outputPath)
         {
-            var newSchemas = schemas.Where(s => !s.ExistsInDataverse).ToList();
+            var newSchemas = schemas.Where(s => !s.ColumnExistsInDataverse).ToList();
 
             using (var writer = new StreamWriter(outputPath))
             using (var csv = new CsvWriter(writer, new CsvConfiguration(CultureInfo.InvariantCulture)))

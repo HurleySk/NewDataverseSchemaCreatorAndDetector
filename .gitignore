@@ -142,6 +142,11 @@ appsettings.*.json
 connectionstrings.json
 secrets.json
 
+# Token cache
+tokencache/
+.tokencache
+*tokencache*
+
 # Backup files
 *.bak
 *.backup

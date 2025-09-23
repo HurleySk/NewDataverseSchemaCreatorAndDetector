@@ -14,15 +14,19 @@ namespace DataverseSchemaManager
         private static DataverseService _dataverseService = new();
         private static ExcelReaderService _excelReader = new();
         private static CsvExportService _csvExporter = new();
+        private static bool _exitRequested = false;
 
         static void Main(string[] args)
         {
-            if (args.Length > 0 && args[0] == "--generate-sample")
+            if (args.Length > 0)
             {
-                Console.WriteLine("Creating sample Excel file...");
-                GenerateSampleExcel.CreateSampleFile("sample_schema.xlsx");
-                Console.WriteLine("Sample file created successfully!");
-                return;
+                if (args[0] == "--generate-sample")
+                {
+                    Console.WriteLine("Creating sample Excel file...");
+                    GenerateSampleExcel.CreateSampleFile("sample_schema.xlsx");
+                    Console.WriteLine("Sample file created successfully!");
+                    return;
+                }
             }
 
             try
@@ -61,8 +65,11 @@ namespace DataverseSchemaManager
             finally
             {
                 _dataverseService?.Dispose();
-                Console.WriteLine("\nPress any key to exit...");
-                Console.ReadKey();
+                if (!_exitRequested)
+                {
+                    Console.WriteLine("\nPress any key to exit...");
+                    Console.ReadKey();
+                }
             }
         }
 
@@ -139,27 +146,38 @@ namespace DataverseSchemaManager
 
         private static void DisplaySchemaStatus(List<SchemaDefinition> schemas)
         {
-            var existingCount = schemas.Count(s => s.ExistsInDataverse);
-            var newCount = schemas.Count(s => !s.ExistsInDataverse);
-            var errorCount = schemas.Count(s => !string.IsNullOrEmpty(s.ErrorMessage));
+            var existingCount = schemas.Count(s => s.ColumnExistsInDataverse);
+            var newCount = schemas.Count(s => !s.ColumnExistsInDataverse);
+            var missingTableErrors = schemas.Count(s => s.ErrorMessage?.Contains("does not exist") == true);
+            var otherErrors = schemas.Count(s => !string.IsNullOrEmpty(s.ErrorMessage) && !s.ErrorMessage.Contains("does not exist"));
 
             Console.WriteLine("\n=== Schema Detection Results ===");
             Console.WriteLine($"Total schemas: {schemas.Count}");
             Console.WriteLine($"Existing in Dataverse: {existingCount}");
             Console.WriteLine($"New schemas to create: {newCount}");
 
-            if (errorCount > 0)
+            if (missingTableErrors > 0)
             {
-                Console.WriteLine($"Errors encountered: {errorCount}");
+                var missingTables = schemas
+                    .Where(s => s.ErrorMessage?.Contains("does not exist") == true)
+                    .Select(s => s.TableName.ToLower())
+                    .Distinct()
+                    .Count();
+                Console.WriteLine($"Missing tables (will be created): {missingTables}");
+            }
+
+            if (otherErrors > 0)
+            {
+                Console.WriteLine($"Other errors encountered: {otherErrors}");
             }
 
             if (newCount > 0)
             {
                 Console.WriteLine("\nNew schemas to be created:");
-                foreach (var schema in schemas.Where(s => !s.ExistsInDataverse))
+                foreach (var schema in schemas.Where(s => !s.ColumnExistsInDataverse))
                 {
                     Console.WriteLine($"  - Table: {schema.TableName}, Column: {schema.ColumnName}, Type: {schema.ColumnType}");
-                    if (!string.IsNullOrEmpty(schema.ErrorMessage))
+                    if (!string.IsNullOrEmpty(schema.ErrorMessage) && !schema.ErrorMessage.Contains("does not exist"))
                     {
                         Console.WriteLine($"    Error: {schema.ErrorMessage}");
                     }
@@ -198,6 +216,7 @@ namespace DataverseSchemaManager
                         DisplaySchemaStatus(schemas);
                         break;
                     case "5":
+                        _exitRequested = true;
                         return;
                     default:
                         Console.WriteLine("Invalid option. Please try again.");
@@ -208,7 +227,7 @@ namespace DataverseSchemaManager
 
         private static void ExportToCsv(List<SchemaDefinition> schemas)
         {
-            var newSchemas = schemas.Where(s => !s.ExistsInDataverse).ToList();
+            var newSchemas = schemas.Where(s => !s.ColumnExistsInDataverse).ToList();
 
             if (newSchemas.Count == 0)
             {
@@ -216,12 +235,17 @@ namespace DataverseSchemaManager
                 return;
             }
 
-            Console.Write("\nEnter output CSV file path (or press Enter for default 'new_schemas.csv'): ");
-            var outputPath = Console.ReadLine();
+            string? outputPath = _config.OutputCsvPath;
 
             if (string.IsNullOrEmpty(outputPath))
             {
-                outputPath = "new_schemas.csv";
+                Console.Write("\nEnter output CSV file path (or press Enter for default 'new_schemas.csv'): ");
+                outputPath = Console.ReadLine();
+
+                if (string.IsNullOrEmpty(outputPath))
+                {
+                    outputPath = "new_schemas.csv";
+                }
             }
 
             try
@@ -237,7 +261,7 @@ namespace DataverseSchemaManager
 
         private static void CreateSchemasInDataverse(List<SchemaDefinition> schemas)
         {
-            var newSchemas = schemas.Where(s => !s.ExistsInDataverse).ToList();
+            var newSchemas = schemas.Where(s => !s.ColumnExistsInDataverse).ToList();
 
             if (newSchemas.Count == 0)
             {
@@ -285,8 +309,34 @@ namespace DataverseSchemaManager
 
                 Console.WriteLine($"\nSolution: {solutionName}");
                 Console.WriteLine($"Publisher prefix: {publisherPrefix}");
-                Console.WriteLine($"Creating {newSchemas.Count} new schemas...");
 
+                var missingTables = newSchemas
+                    .Where(s => s.ErrorMessage?.Contains("does not exist") == true)
+                    .Select(s => s.TableName.ToLower())
+                    .Distinct()
+                    .ToList();
+
+                if (missingTables.Any())
+                {
+                    Console.WriteLine($"\n=== WARNING: Missing Tables ===");
+                    Console.WriteLine($"The following {missingTables.Count} table(s) do not exist and will be created:");
+                    foreach (var table in missingTables)
+                    {
+                        Console.WriteLine($"  - {table}");
+                    }
+                }
+
+                Console.WriteLine($"\nTotal new schemas to create: {newSchemas.Count}");
+                Console.Write("\nDo you want to proceed with schema creation? (yes/no): ");
+                var confirmation = Console.ReadLine()?.Trim().ToLower();
+
+                if (confirmation != "yes" && confirmation != "y")
+                {
+                    Console.WriteLine("Schema creation cancelled.");
+                    return;
+                }
+
+                Console.WriteLine("\nCreating schemas...");
                 _dataverseService.CreateSchema(newSchemas, solutionName, publisherPrefix);
 
                 Console.WriteLine("\nSchema creation completed!");

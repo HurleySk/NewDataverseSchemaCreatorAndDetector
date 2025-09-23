@@ -52,16 +52,19 @@ Edit `appsettings.json` to configure the application:
   "TableNameColumn": "Table Name",
   "ColumnNameColumn": "Column Name",
   "ColumnTypeColumn": "Column Type",
+  "ChoiceOptionsColumn": "Choice Options",
   "OutputCsvPath": "new_schemas.csv"
 }
 ```
 
 ### Connection String Format
 
-The connection string should follow this format:
+For OAuth with token caching (recommended - avoids re-authentication):
 ```
-AuthType=OAuth;Url=https://yourorg.crm.dynamics.com;Username=user@org.com;Password=yourpassword;RequireNewInstance=true
+AuthType=OAuth;Username=user@org.com;Url=https://yourorg.crm.dynamics.com/;AppId=51f81489-12ee-4a9e-aaae-a2591f45987d;RedirectUri=http://localhost;RequireNewInstance=false;TokenCacheStorePath=C:\\path\\to\\tokencache
 ```
+
+**Important**: Include `Username` parameter for token caching to work. Without it, you'll be prompted to authenticate every time.
 
 For other authentication types, refer to the [Microsoft Dataverse documentation](https://docs.microsoft.com/en-us/power-apps/developer/data-platform/xrm-tooling/use-connection-strings-xrm-tooling-connect).
 
@@ -69,11 +72,11 @@ For other authentication types, refer to the [Microsoft Dataverse documentation]
 
 Your Excel file should have the following columns (column names are configurable):
 
-| Table Name | Column Name | Column Type |
-|------------|-------------|-------------|
-| account    | new_field1  | text        |
-| contact    | new_field2  | number      |
-| lead       | new_field3  | boolean     |
+| Table Name | Column Name | Column Type | Choice Options |
+|------------|-------------|-------------|----------------|
+| account    | new_field1  | text        |                |
+| contact    | new_field2  | number      |                |
+| lead       | new_status  | choice      | New;Contacted;Qualified;Lost |
 
 ### Supported Column Types
 
@@ -82,6 +85,26 @@ Your Excel file should have the following columns (column names are configurable
 - `decimal`, `money`, or `currency` - Currency/decimal values
 - `date` or `datetime` - Date and time values
 - `boolean`, `bool`, or `bit` - Yes/No (two options)
+- `choice` or `picklist` - Choice field (requires Choice Options column)
+
+### Choice Field Format
+
+For choice/picklist columns, specify options in the **Choice Options** column using one of these formats:
+
+**Simple format** (auto-generates values 1, 2, 3...):
+```
+Option1;Option2;Option3
+```
+
+**With explicit values**:
+```
+1:Option1;2:Option2;3:Option3
+```
+
+**Examples**:
+- Status field: `New;In Progress;Completed;Cancelled`
+- Priority: `100:Low;200:Medium;300:High;400:Critical`
+- Region: `North;South;East;West`
 
 ## Usage
 
