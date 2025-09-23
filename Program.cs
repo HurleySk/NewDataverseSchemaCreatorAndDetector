@@ -17,20 +17,12 @@ namespace DataverseSchemaManager
 
         static void Main(string[] args)
         {
-            if (args.Length > 0)
+            if (args.Length > 0 && args[0] == "--generate-sample")
             {
-                if (args[0] == "--generate-sample")
-                {
-                    Console.WriteLine("Creating sample Excel file...");
-                    GenerateSampleExcel.CreateSampleFile("sample_schema.xlsx");
-                    Console.WriteLine("Sample file created successfully!");
-                    return;
-                }
-                else if (args[0] == "--analyze" && args.Length > 1)
-                {
-                    AnalyzeExcel.Analyze(args[1]);
-                    return;
-                }
+                Console.WriteLine("Creating sample Excel file...");
+                GenerateSampleExcel.CreateSampleFile("sample_schema.xlsx");
+                Console.WriteLine("Sample file created successfully!");
+                return;
             }
 
             try
