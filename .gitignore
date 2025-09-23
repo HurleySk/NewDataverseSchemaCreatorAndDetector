@@ -1,0 +1,161 @@
+# .NET / C# Build Results
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio 2022 cache/options directory
+.vs/
+
+# Visual Studio Code
+.vscode/
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# NuGet Packages
+*.nupkg
+# NuGet Symbol Packages
+*.snupkg
+# The packages folder can be ignored because of Package Restore
+**/[Pp]ackages/*
+# except build/, which is used as an MSBuild target
+!**/[Pp]ackages/build/
+# Uncomment if necessary however generally it will be regenerated when needed
+#!**/[Pp]ackages/repositories.config
+# NuGet v3's project.json files produces more ignorable files
+*.nuget.props
+*.nuget.targets
+
+# Build Results
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# .NET Core / .NET 5+
+*.dll
+*.exe
+*.pdb
+*.cache
+*.ilk
+*.log
+*.vspscc
+*.vssscc
+
+# MSTest test Results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# .NET Scaffolding
+ScaffoldingReadMe.txt
+
+# StyleCop
+StyleCopReport.xml
+
+# Files built by Visual Studio
+*_i.c
+*_p.c
+*_h.h
+*.meta
+*.iobj
+*.ipdb
+*.pgc
+*.pgd
+*.rsp
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp
+*.tmp_proj
+*_wpftmp.csproj
+*.tlog
+*.vspscc
+*.vssscc
+.builds
+*.pidb
+*.svclog
+*.scc
+
+# ReSharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# Publish Profiles
+PublishProfiles/
+*.pubxml
+*.publishproj
+
+# Windows specific
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux specific
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# Claude AI artifacts
+.claude/
+claude.json
+.claude.json
+*.claude
+
+# Application specific
+appsettings.json
+appsettings.*.json
+!appsettings.template.json
+*.xlsx
+*.xls
+*.csv
+!sample_data/
+connectionstrings.json
+secrets.json
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Log files
+*.log
+logs/
+
+# Temporary files
+*.tmp
+temp/
+tmp/
+
+# Output files from the application (can be regenerated)
+new_schemas.csv
+output/
+exports/
