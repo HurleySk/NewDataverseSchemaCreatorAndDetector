@@ -129,6 +129,7 @@ $RECYCLE.BIN/
 claude.json
 .claude.json
 *.claude
+CLAUDE.md
 
 # Application specific
 appsettings.json
