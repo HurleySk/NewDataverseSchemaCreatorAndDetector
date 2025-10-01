@@ -1,110 +1,194 @@
+using DataverseSchemaManager.Constants;
+using DataverseSchemaManager.Interfaces;
 using DataverseSchemaManager.Models;
+using Microsoft.Extensions.Logging;
 using Microsoft.PowerPlatform.Dataverse.Client;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
 using Microsoft.Xrm.Sdk.Query;
+using Polly;
+using Polly.Retry;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.ServiceModel;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace DataverseSchemaManager.Services
 {
-    public class DataverseService : IDisposable
+    /// <summary>
+    /// Provides operations for interacting with Microsoft Dataverse.
+    /// </summary>
+    public class DataverseService : IDataverseService
     {
         private ServiceClient? _serviceClient;
+        private readonly ILogger<DataverseService> _logger;
+        private readonly AsyncRetryPolicy _retryPolicy;
 
-        public bool Connect(string connectionString)
+        public DataverseService(ILogger<DataverseService> logger)
+        {
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+            // Configure retry policy for transient failures
+            _retryPolicy = Policy
+                .Handle<FaultException<OrganizationServiceFault>>(ex =>
+                    ex.Detail.ErrorCode == DataverseConstants.ErrorCodes.ApiLimitExceeded)
+                .WaitAndRetryAsync(
+                    DataverseConstants.Api.MaxRetryAttempts,
+                    retryAttempt => TimeSpan.FromMilliseconds(
+                        DataverseConstants.Api.RetryBaseDelayMs * Math.Pow(2, retryAttempt - 1)),
+                    onRetry: (exception, timeSpan, retryCount, context) =>
+                    {
+                        _logger.LogWarning(
+                            "API throttling detected. Retry {RetryCount} of {MaxRetries}. Waiting {DelayMs}ms before retry. Error: {Error}",
+                            retryCount,
+                            DataverseConstants.Api.MaxRetryAttempts,
+                            timeSpan.TotalMilliseconds,
+                            exception.Message);
+                    });
+        }
+
+        /// <inheritdoc/>
+        public async Task<bool> ConnectAsync(string connectionString, CancellationToken cancellationToken = default)
         {
             try
             {
-                _serviceClient = new ServiceClient(connectionString);
+                _logger.LogInformation("Attempting to connect to Dataverse...");
 
-                if (!_serviceClient.IsReady)
+                await Task.Run(() =>
                 {
-                    Console.WriteLine($"Connection failed. Error: {_serviceClient.LastError}");
-                    if (_serviceClient.LastException != null)
+                    _serviceClient = new ServiceClient(connectionString);
+                }, cancellationToken);
+
+                if (_serviceClient == null || !_serviceClient.IsReady)
+                {
+                    _logger.LogError(
+                        "Connection failed. Error: {Error}",
+                        _serviceClient?.LastError ?? "ServiceClient is null");
+
+                    if (_serviceClient?.LastException != null)
                     {
-                        Console.WriteLine($"Exception: {_serviceClient.LastException.Message}");
-                        Console.WriteLine($"Stack: {_serviceClient.LastException.StackTrace}");
+                        _logger.LogError(
+                            _serviceClient.LastException,
+                            "Connection exception details");
                     }
+
                     return false;
                 }
 
+                _logger.LogInformation("Successfully connected to Dataverse environment: {Url}",
+                    _serviceClient.ConnectedOrgFriendlyName ?? "Unknown");
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error connecting to Dataverse: {ex.Message}");
-                Console.WriteLine($"Stack: {ex.StackTrace}");
+                _logger.LogError(ex, "Error connecting to Dataverse");
                 return false;
             }
         }
 
-        public void CheckSchemaExists(List<SchemaDefinition> schemas)
+        /// <inheritdoc/>
+        public async Task CheckSchemaExistsAsync(List<SchemaDefinition> schemas, CancellationToken cancellationToken = default)
         {
             if (_serviceClient == null || !_serviceClient.IsReady)
             {
                 throw new InvalidOperationException("Not connected to Dataverse");
             }
 
+            _logger.LogInformation("Checking existence of {Count} schema definitions across {TableCount} tables",
+                schemas.Count,
+                schemas.Select(s => s.TableName.ToLower()).Distinct().Count());
+
             var groupedByTable = schemas.GroupBy(s => s.TableName.ToLower());
 
             foreach (var tableGroup in groupedByTable)
             {
-                try
+                cancellationToken.ThrowIfCancellationRequested();
+                await CheckTableSchemaAsync(tableGroup.ToList(), tableGroup.Key, cancellationToken);
+            }
+
+            _logger.LogInformation("Schema check completed");
+        }
+
+        private async Task CheckTableSchemaAsync(List<SchemaDefinition> tableSchemas, string tableName, CancellationToken cancellationToken)
+        {
+            try
+            {
+                _logger.LogDebug("Checking table '{TableName}' with {ColumnCount} columns", tableName, tableSchemas.Count);
+
+                var request = new RetrieveEntityRequest
                 {
-                    var request = new RetrieveEntityRequest
-                    {
-                        LogicalName = tableGroup.Key,
-                        EntityFilters = EntityFilters.Attributes
-                    };
+                    LogicalName = tableName,
+                    EntityFilters = EntityFilters.Attributes
+                };
 
-                    var response = (RetrieveEntityResponse)_serviceClient.Execute(request);
-                    var entityMetadata = response.EntityMetadata;
-
-                    var existingAttributes = entityMetadata.Attributes
-                        .Where(a => a.LogicalName != null)
-                        .Select(a => a.LogicalName.ToLower())
-                        .ToHashSet();
-
-                    foreach (var schema in tableGroup)
-                    {
-                        var columnExists = existingAttributes.Contains(schema.ColumnName.ToLower());
-                        schema.TableExistsInDataverse = true;
-                        schema.ColumnExistsInDataverse = columnExists;
-                    }
-                }
-                catch (FaultException<OrganizationServiceFault> ex)
+                var response = await _retryPolicy.ExecuteAsync(async () =>
                 {
-                    if (ex.Detail.ErrorCode == -2147185403 || ex.Detail.ErrorCode == 31993685)
+                    return await Task.Run(() =>
+                        (RetrieveEntityResponse)_serviceClient!.Execute(request),
+                        cancellationToken);
+                });
+
+                var entityMetadata = response.EntityMetadata;
+                var existingAttributes = entityMetadata.Attributes
+                    .Where(a => a.LogicalName != null)
+                    .Select(a => a.LogicalName!.ToLower())
+                    .ToHashSet();
+
+                foreach (var schema in tableSchemas)
+                {
+                    var columnExists = existingAttributes.Contains(schema.ColumnName.ToLower());
+                    schema.TableExistsInDataverse = true;
+                    schema.ColumnExistsInDataverse = columnExists;
+
+                    if (columnExists)
                     {
-                        foreach (var schema in tableGroup)
-                        {
-                            schema.TableExistsInDataverse = false;
-                            schema.ColumnExistsInDataverse = false;
-                        }
+                        _logger.LogDebug("Column '{Table}.{Column}' exists", tableName, schema.ColumnName);
                     }
                     else
                     {
-                        foreach (var schema in tableGroup)
-                        {
-                            schema.ErrorMessage = ex.Message;
-                        }
+                        _logger.LogDebug("Column '{Table}.{Column}' does not exist (will be created)", tableName, schema.ColumnName);
                     }
                 }
-                catch (Exception ex)
+            }
+            catch (FaultException<OrganizationServiceFault> ex)
+            {
+                if (ex.Detail.ErrorCode == DataverseConstants.ErrorCodes.EntityDoesNotExist ||
+                    ex.Detail.ErrorCode == DataverseConstants.ErrorCodes.EntityNotFound)
                 {
-                    foreach (var schema in tableGroup)
+                    _logger.LogWarning("Table '{TableName}' does not exist (will be created)", tableName);
+
+                    foreach (var schema in tableSchemas)
+                    {
+                        schema.TableExistsInDataverse = false;
+                        schema.ColumnExistsInDataverse = false;
+                    }
+                }
+                else
+                {
+                    _logger.LogError(ex, "Error checking table '{TableName}': {Error}", tableName, ex.Message);
+
+                    foreach (var schema in tableSchemas)
                     {
                         schema.ErrorMessage = ex.Message;
                     }
                 }
             }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error checking table '{TableName}'", tableName);
+
+                foreach (var schema in tableSchemas)
+                {
+                    schema.ErrorMessage = ex.Message;
+                }
+            }
         }
 
-        public void CreateSchema(List<SchemaDefinition> schemas, string solutionName, string publisherPrefix)
+        /// <inheritdoc/>
+        public async Task CreateSchemaAsync(List<SchemaDefinition> schemas, string solutionName, string publisherPrefix, CancellationToken cancellationToken = default)
         {
             if (_serviceClient == null || !_serviceClient.IsReady)
             {
@@ -112,10 +196,14 @@ namespace DataverseSchemaManager.Services
             }
 
             var newSchemas = schemas.Where(s => !s.ColumnExistsInDataverse).ToList();
+            _logger.LogInformation("Creating {Count} new schemas in solution '{Solution}'", newSchemas.Count, solutionName);
+
             var groupedByTable = newSchemas.GroupBy(s => s.TableName.ToLower());
 
             foreach (var tableGroup in groupedByTable)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 var tableName = tableGroup.Key;
                 var hasTableError = tableGroup.First().ErrorMessage?.Contains("does not exist") == true;
 
@@ -123,8 +211,8 @@ namespace DataverseSchemaManager.Services
                 {
                     try
                     {
-                        CreateTable(tableName, publisherPrefix, solutionName);
-                        Console.WriteLine($"Created table '{tableName}'");
+                        await CreateTableAsync(tableName, publisherPrefix, solutionName, cancellationToken);
+                        _logger.LogInformation("Created table '{TableName}'", tableName);
 
                         foreach (var schema in tableGroup)
                         {
@@ -134,7 +222,8 @@ namespace DataverseSchemaManager.Services
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Error creating table '{tableName}': {ex.Message}");
+                        _logger.LogError(ex, "Error creating table '{TableName}'", tableName);
+
                         foreach (var schema in tableGroup)
                         {
                             schema.ErrorMessage = $"Failed to create table: {ex.Message}";
@@ -145,24 +234,18 @@ namespace DataverseSchemaManager.Services
 
                 foreach (var schema in tableGroup)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     try
                     {
-                        var attributeMetadata = CreateAttributeMetadata(schema, publisherPrefix);
-
-                        var request = new CreateAttributeRequest
-                        {
-                            EntityName = tableName,
-                            Attribute = attributeMetadata,
-                            SolutionUniqueName = solutionName
-                        };
-
-                        _serviceClient.Execute(request);
+                        await CreateColumnAsync(schema, tableName, publisherPrefix, solutionName, cancellationToken);
                         schema.ColumnExistsInDataverse = true;
-                        Console.WriteLine($"Created column '{schema.ColumnName}' in table '{schema.TableName}'");
+                        _logger.LogInformation("Created column '{Table}.{Column}' (Type: {Type})",
+                            schema.TableName, schema.ColumnName, schema.ColumnType);
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Error creating column '{schema.ColumnName}' in table '{schema.TableName}': {ex.Message}");
+                        _logger.LogError(ex, "Error creating column '{Table}.{Column}'", schema.TableName, schema.ColumnName);
                         schema.ErrorMessage = ex.Message;
                     }
                 }
@@ -170,14 +253,32 @@ namespace DataverseSchemaManager.Services
 
             try
             {
-                var publishRequest = new Microsoft.Crm.Sdk.Messages.PublishAllXmlRequest();
-                _serviceClient.Execute(publishRequest);
-                Console.WriteLine("Published all customizations");
+                await PublishAllCustomizationsAsync(cancellationToken);
+                _logger.LogInformation("Published all customizations");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error publishing customizations: {ex.Message}");
+                _logger.LogError(ex, "Error publishing customizations");
             }
+        }
+
+        private async Task CreateColumnAsync(SchemaDefinition schema, string tableName, string publisherPrefix, string solutionName, CancellationToken cancellationToken)
+        {
+            var attributeMetadata = CreateAttributeMetadata(schema, publisherPrefix);
+
+            var request = new CreateAttributeRequest
+            {
+                EntityName = tableName,
+                Attribute = attributeMetadata,
+                SolutionUniqueName = solutionName
+            };
+
+            await _retryPolicy.ExecuteAsync(async () =>
+            {
+                return await Task.Run(() =>
+                    _serviceClient!.Execute(request),
+                    cancellationToken);
+            });
         }
 
         private AttributeMetadata CreateAttributeMetadata(SchemaDefinition schema, string publisherPrefix)
@@ -185,6 +286,8 @@ namespace DataverseSchemaManager.Services
             var logicalName = $"{publisherPrefix}_{schema.ColumnName.ToLower().Replace(" ", "_")}";
             var displayName = schema.ColumnName;
             var columnType = schema.ColumnType.Trim().ToLower();
+
+            _logger.LogDebug("Creating attribute metadata for '{Column}' with type '{Type}'", schema.ColumnName, columnType);
 
             // Check for unsupported types first
             if (columnType.StartsWith("lookup"))
@@ -210,10 +313,10 @@ namespace DataverseSchemaManager.Services
                 {
                     SchemaName = logicalName,
                     RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
-                    MaxLength = 100,
+                    MaxLength = DataverseConstants.AttributeDefaults.TextMaxLength,
                     Format = StringFormat.Text,
-                    DisplayName = new Label(displayName, 1033),
-                    Description = new Label($"Auto-generated column: {displayName}", 1033)
+                    DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode),
+                    Description = new Label(string.Format(DataverseConstants.Messages.AutoGeneratedColumnDescription, displayName), DataverseConstants.Localization.DefaultLanguageCode)
                 },
 
                 // Multi-line text
@@ -221,10 +324,10 @@ namespace DataverseSchemaManager.Services
                 {
                     SchemaName = logicalName,
                     RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
-                    MaxLength = 2000,
+                    MaxLength = DataverseConstants.AttributeDefaults.MemoMaxLength,
                     Format = StringFormat.Text,
-                    DisplayName = new Label(displayName, 1033),
-                    Description = new Label($"Auto-generated column: {displayName}", 1033)
+                    DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode),
+                    Description = new Label(string.Format(DataverseConstants.Messages.AutoGeneratedColumnDescription, displayName), DataverseConstants.Localization.DefaultLanguageCode)
                 },
 
                 // Integer types
@@ -234,8 +337,8 @@ namespace DataverseSchemaManager.Services
                     RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
                     MinValue = int.MinValue,
                     MaxValue = int.MaxValue,
-                    DisplayName = new Label(displayName, 1033),
-                    Description = new Label($"Auto-generated column: {displayName}", 1033)
+                    DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode),
+                    Description = new Label(string.Format(DataverseConstants.Messages.AutoGeneratedColumnDescription, displayName), DataverseConstants.Localization.DefaultLanguageCode)
                 },
 
                 // Decimal/Money types
@@ -243,12 +346,12 @@ namespace DataverseSchemaManager.Services
                 {
                     SchemaName = logicalName,
                     RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
-                    MinValue = -922337203685477.0000,
-                    MaxValue = 922337203685477.0000,
-                    Precision = 2,
-                    PrecisionSource = 2,
-                    DisplayName = new Label(displayName, 1033),
-                    Description = new Label($"Auto-generated column: {displayName}", 1033)
+                    MinValue = DataverseConstants.AttributeDefaults.MoneyMinValue,
+                    MaxValue = DataverseConstants.AttributeDefaults.MoneyMaxValue,
+                    Precision = DataverseConstants.AttributeDefaults.DefaultPrecision,
+                    PrecisionSource = DataverseConstants.AttributeDefaults.MoneyPrecisionSource,
+                    DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode),
+                    Description = new Label(string.Format(DataverseConstants.Messages.AutoGeneratedColumnDescription, displayName), DataverseConstants.Localization.DefaultLanguageCode)
                 },
 
                 // Floating point
@@ -256,11 +359,11 @@ namespace DataverseSchemaManager.Services
                 {
                     SchemaName = logicalName,
                     RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
-                    MinValue = -100000000000.0,
-                    MaxValue = 100000000000.0,
-                    Precision = 2,
-                    DisplayName = new Label(displayName, 1033),
-                    Description = new Label($"Auto-generated column: {displayName}", 1033)
+                    MinValue = DataverseConstants.AttributeDefaults.DoubleMinValue,
+                    MaxValue = DataverseConstants.AttributeDefaults.DoubleMaxValue,
+                    Precision = DataverseConstants.AttributeDefaults.DefaultPrecision,
+                    DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode),
+                    Description = new Label(string.Format(DataverseConstants.Messages.AutoGeneratedColumnDescription, displayName), DataverseConstants.Localization.DefaultLanguageCode)
                 },
 
                 // DateTime types
@@ -269,8 +372,8 @@ namespace DataverseSchemaManager.Services
                     SchemaName = logicalName,
                     RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
                     Format = DateTimeFormat.DateAndTime,
-                    DisplayName = new Label(displayName, 1033),
-                    Description = new Label($"Auto-generated column: {displayName}", 1033)
+                    DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode),
+                    Description = new Label(string.Format(DataverseConstants.Messages.AutoGeneratedColumnDescription, displayName), DataverseConstants.Localization.DefaultLanguageCode)
                 },
 
                 // Date only
@@ -279,8 +382,8 @@ namespace DataverseSchemaManager.Services
                     SchemaName = logicalName,
                     RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
                     Format = DateTimeFormat.DateOnly,
-                    DisplayName = new Label(displayName, 1033),
-                    Description = new Label($"Auto-generated column: {displayName}", 1033)
+                    DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode),
+                    Description = new Label(string.Format(DataverseConstants.Messages.AutoGeneratedColumnDescription, displayName), DataverseConstants.Localization.DefaultLanguageCode)
                 },
 
                 // Boolean types
@@ -290,11 +393,11 @@ namespace DataverseSchemaManager.Services
                     RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
                     DefaultValue = false,
                     OptionSet = new BooleanOptionSetMetadata(
-                        new OptionMetadata(new Label("Yes", 1033), 1),
-                        new OptionMetadata(new Label("No", 1033), 0)
+                        new OptionMetadata(new Label("Yes", DataverseConstants.Localization.DefaultLanguageCode), 1),
+                        new OptionMetadata(new Label("No", DataverseConstants.Localization.DefaultLanguageCode), 0)
                     ),
-                    DisplayName = new Label(displayName, 1033),
-                    Description = new Label($"Auto-generated column: {displayName}", 1033)
+                    DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode),
+                    Description = new Label(string.Format(DataverseConstants.Messages.AutoGeneratedColumnDescription, displayName), DataverseConstants.Localization.DefaultLanguageCode)
                 },
 
                 // Choice/Picklist types
@@ -340,7 +443,7 @@ namespace DataverseSchemaManager.Services
                     optionLabel = trimmedOption;
                 }
 
-                options.Add(new OptionMetadata(new Label(optionLabel, 1033), optionValue));
+                options.Add(new OptionMetadata(new Label(optionLabel, DataverseConstants.Localization.DefaultLanguageCode), optionValue));
             }
 
             if (options.Count == 0)
@@ -363,13 +466,13 @@ namespace DataverseSchemaManager.Services
             {
                 SchemaName = logicalName,
                 RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
-                DisplayName = new Label(displayName, 1033),
-                Description = new Label($"Auto-generated choice column: {displayName}", 1033),
+                DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode),
+                Description = new Label(string.Format(DataverseConstants.Messages.AutoGeneratedChoiceDescription, displayName), DataverseConstants.Localization.DefaultLanguageCode),
                 OptionSet = optionSet
             };
         }
 
-        private void CreateTable(string tableName, string publisherPrefix, string solutionName)
+        private async Task CreateTableAsync(string tableName, string publisherPrefix, string solutionName, CancellationToken cancellationToken)
         {
             if (_serviceClient == null || !_serviceClient.IsReady)
             {
@@ -379,12 +482,14 @@ namespace DataverseSchemaManager.Services
             var schemaName = $"{publisherPrefix}_{tableName.ToLower().Replace(" ", "_")}";
             var displayName = tableName;
 
+            _logger.LogInformation("Creating new table '{TableName}' with schema name '{SchemaName}'", displayName, schemaName);
+
             var entityMetadata = new EntityMetadata
             {
                 SchemaName = schemaName,
-                DisplayName = new Label(displayName, 1033),
-                DisplayCollectionName = new Label($"{displayName}s", 1033),
-                Description = new Label($"Auto-generated table: {displayName}", 1033),
+                DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode),
+                DisplayCollectionName = new Label($"{displayName}s", DataverseConstants.Localization.DefaultLanguageCode),
+                Description = new Label(string.Format(DataverseConstants.Messages.AutoGeneratedTableDescription, displayName), DataverseConstants.Localization.DefaultLanguageCode),
                 OwnershipType = OwnershipTypes.UserOwned,
                 IsActivity = false,
                 HasNotes = false,
@@ -395,10 +500,10 @@ namespace DataverseSchemaManager.Services
             {
                 SchemaName = $"{publisherPrefix}_name",
                 RequiredLevel = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.None),
-                MaxLength = 100,
+                MaxLength = DataverseConstants.AttributeDefaults.TextMaxLength,
                 Format = StringFormat.Text,
-                DisplayName = new Label("Name", 1033),
-                Description = new Label("Primary name field", 1033)
+                DisplayName = new Label("Name", DataverseConstants.Localization.DefaultLanguageCode),
+                Description = new Label(DataverseConstants.Messages.PrimaryNameFieldDescription, DataverseConstants.Localization.DefaultLanguageCode)
             };
 
             var request = new Microsoft.Xrm.Sdk.Messages.CreateEntityRequest
@@ -408,15 +513,23 @@ namespace DataverseSchemaManager.Services
                 SolutionUniqueName = solutionName
             };
 
-            _serviceClient.Execute(request);
+            await _retryPolicy.ExecuteAsync(async () =>
+            {
+                return await Task.Run(() =>
+                    _serviceClient!.Execute(request),
+                    cancellationToken);
+            });
         }
 
-        public List<Entity> GetSolutions()
+        /// <inheritdoc/>
+        public async Task<List<Entity>> GetSolutionsAsync(CancellationToken cancellationToken = default)
         {
             if (_serviceClient == null || !_serviceClient.IsReady)
             {
                 throw new InvalidOperationException("Not connected to Dataverse");
             }
+
+            _logger.LogDebug("Retrieving unmanaged solutions from Dataverse");
 
             var query = new QueryExpression("solution")
             {
@@ -431,23 +544,53 @@ namespace DataverseSchemaManager.Services
                 }
             };
 
-            var solutions = _serviceClient.RetrieveMultiple(query);
+            var solutions = await Task.Run(() =>
+                _serviceClient.RetrieveMultiple(query),
+                cancellationToken);
+
+            _logger.LogInformation("Retrieved {Count} unmanaged solutions", solutions.Entities.Count);
+
             return solutions.Entities.ToList();
         }
 
-        public string? GetPublisherPrefix(Guid publisherId)
+        /// <inheritdoc/>
+        public async Task<string?> GetPublisherPrefixAsync(Guid publisherId, CancellationToken cancellationToken = default)
         {
             if (_serviceClient == null || !_serviceClient.IsReady)
             {
                 throw new InvalidOperationException("Not connected to Dataverse");
             }
 
-            var publisher = _serviceClient.Retrieve("publisher", publisherId, new ColumnSet("customizationprefix"));
-            return publisher.GetAttributeValue<string>("customizationprefix");
+            _logger.LogDebug("Retrieving publisher prefix for publisher ID: {PublisherId}", publisherId);
+
+            var publisher = await Task.Run(() =>
+                _serviceClient.Retrieve("publisher", publisherId, new ColumnSet("customizationprefix")),
+                cancellationToken);
+
+            var prefix = publisher.GetAttributeValue<string>("customizationprefix");
+
+            _logger.LogDebug("Publisher prefix: {Prefix}", prefix);
+
+            return prefix;
+        }
+
+        private async Task PublishAllCustomizationsAsync(CancellationToken cancellationToken)
+        {
+            _logger.LogInformation("Publishing all customizations...");
+
+            var publishRequest = new Microsoft.Crm.Sdk.Messages.PublishAllXmlRequest();
+
+            await _retryPolicy.ExecuteAsync(async () =>
+            {
+                return await Task.Run(() =>
+                    _serviceClient!.Execute(publishRequest),
+                    cancellationToken);
+            });
         }
 
         public void Dispose()
         {
+            _logger.LogDebug("Disposing DataverseService");
             _serviceClient?.Dispose();
         }
     }
