@@ -2,17 +2,24 @@ namespace DataverseSchemaManager.Models
 {
     public class SchemaDefinition
     {
-        // Required Excel columns
-        public string TableName { get; set; } = string.Empty;
-        public string ColumnName { get; set; } = string.Empty;
-        public string ColumnType { get; set; } = string.Empty;
+        // Required for DETECTION (Phase 1 - Assess)
+        public string LogicalName { get; set; } = string.Empty;
+        public string TableLogicalName { get; set; } = string.Empty;
+
+        // Required for CREATION (Phase 2 - Create)
+        public string? TableName { get; set; }
+        public string? ColumnName { get; set; }
+        public string? ColumnType { get; set; }
 
         // Optional Excel columns - Choice fields
         public string? ChoiceOptions { get; set; }
 
-        // Optional Excel columns - Phase 1 enhancements
-        public string? LogicalName { get; set; }
-        public string? TableLogicalName { get; set; }
+        // Optional Excel columns - Lookup/Customer fields
+        public string? LookupTargetTable { get; set; }
+        public string? LookupRelationshipName { get; set; }
+        public string? CustomerTargetTables { get; set; }
+
+        // Optional Excel columns - Metadata
         public string? TableDisplayCollectionName { get; set; }
         public string? Description { get; set; }
         public string? Required { get; set; }

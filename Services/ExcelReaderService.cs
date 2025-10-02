@@ -161,16 +161,44 @@ namespace DataverseSchemaManager.Services
                     worksheet.Dimension?.End.Row ?? 0,
                     worksheet.Dimension?.End.Column ?? 0);
 
-                var tableNameColumn = FindColumnIndex(worksheet, config.TableNameColumn ?? "Table Name");
-                var columnNameColumn = FindColumnIndex(worksheet, config.ColumnNameColumn ?? "Column Name");
-                var columnTypeColumn = FindColumnIndex(worksheet, config.ColumnTypeColumn ?? "Column Type");
+                // Required columns - Logical names (for detection)
+                var logicalNameColumn = FindColumnIndex(worksheet, config.LogicalNameColumn ?? "Logical Name");
+                var tableLogicalNameColumn = FindColumnIndex(worksheet, config.TableLogicalNameColumn ?? "Table Logical Name");
+
+                // Validate required columns exist
+                if (logicalNameColumn == -1 || tableLogicalNameColumn == -1)
+                {
+                    var missing = new List<string>();
+                    if (logicalNameColumn == -1) missing.Add(config.LogicalNameColumn ?? "Logical Name");
+                    if (tableLogicalNameColumn == -1) missing.Add(config.TableLogicalNameColumn ?? "Table Logical Name");
+
+                    _logger.LogError("Required columns not found: {MissingColumns}", string.Join(", ", missing));
+
+                    throw new InvalidOperationException(
+                        $"Required columns not found in Excel: {string.Join(", ", missing)}. " +
+                        $"These columns are REQUIRED for schema detection.");
+                }
+
+                // Optional columns - Display names (for creation)
+                var tableNameColumn = !string.IsNullOrEmpty(config.TableNameColumn)
+                    ? FindColumnIndex(worksheet, config.TableNameColumn) : -1;
+                var columnNameColumn = !string.IsNullOrEmpty(config.ColumnNameColumn)
+                    ? FindColumnIndex(worksheet, config.ColumnNameColumn) : -1;
+                var columnTypeColumn = !string.IsNullOrEmpty(config.ColumnTypeColumn)
+                    ? FindColumnIndex(worksheet, config.ColumnTypeColumn) : -1;
+
+                // Optional columns - Choice fields
                 var choiceOptionsColumn = FindColumnIndex(worksheet, config.ChoiceOptionsColumn ?? "Choice Options");
 
-                // Phase 1 optional columns
-                var logicalNameColumn = !string.IsNullOrEmpty(config.LogicalNameColumn)
-                    ? FindColumnIndex(worksheet, config.LogicalNameColumn) : -1;
-                var tableLogicalNameColumn = !string.IsNullOrEmpty(config.TableLogicalNameColumn)
-                    ? FindColumnIndex(worksheet, config.TableLogicalNameColumn) : -1;
+                // Optional columns - Lookup/Customer fields
+                var lookupTargetTableColumn = !string.IsNullOrEmpty(config.LookupTargetTableColumn)
+                    ? FindColumnIndex(worksheet, config.LookupTargetTableColumn) : -1;
+                var lookupRelationshipNameColumn = !string.IsNullOrEmpty(config.LookupRelationshipNameColumn)
+                    ? FindColumnIndex(worksheet, config.LookupRelationshipNameColumn) : -1;
+                var customerTargetTablesColumn = !string.IsNullOrEmpty(config.CustomerTargetTablesColumn)
+                    ? FindColumnIndex(worksheet, config.CustomerTargetTablesColumn) : -1;
+
+                // Optional columns - Metadata
                 var tableDisplayCollectionNameColumn = !string.IsNullOrEmpty(config.TableDisplayCollectionNameColumn)
                     ? FindColumnIndex(worksheet, config.TableDisplayCollectionNameColumn) : -1;
                 var descriptionColumn = !string.IsNullOrEmpty(config.DescriptionColumn)
@@ -178,37 +206,28 @@ namespace DataverseSchemaManager.Services
                 var requiredColumn = !string.IsNullOrEmpty(config.RequiredColumn)
                     ? FindColumnIndex(worksheet, config.RequiredColumn) : -1;
 
-                if (tableNameColumn == -1 || columnNameColumn == -1 || columnTypeColumn == -1)
-                {
-                    _logger.LogError(
-                        "Required columns not found. Looking for: TableName='{TableName}', ColumnName='{ColumnName}', ColumnType='{ColumnType}'",
-                        config.TableNameColumn,
-                        config.ColumnNameColumn,
-                        config.ColumnTypeColumn);
-
-                    throw new InvalidOperationException(
-                        $"Required columns not found. Looking for: {config.TableNameColumn}, " +
-                        $"{config.ColumnNameColumn}, {config.ColumnTypeColumn}");
-                }
+                // Optional columns - Filtering
+                var includeColumn = !string.IsNullOrEmpty(config.IncludeColumn)
+                    ? FindColumnIndex(worksheet, config.IncludeColumn) : -1;
 
                 _logger.LogDebug(
-                    "Found columns - Table: {TableCol}, Column: {ColumnCol}, Type: {TypeCol}, Choice: {ChoiceCol}",
-                    tableNameColumn,
-                    columnNameColumn,
-                    columnTypeColumn,
-                    choiceOptionsColumn != -1 ? choiceOptionsColumn.ToString() : "Not found");
+                    "Found required columns - LogicalName: {LogicalCol}, TableLogicalName: {TableLogicalCol}",
+                    logicalNameColumn,
+                    tableLogicalNameColumn);
 
-                if (logicalNameColumn != -1 || tableLogicalNameColumn != -1 || tableDisplayCollectionNameColumn != -1
-                    || descriptionColumn != -1 || requiredColumn != -1)
+                if (choiceOptionsColumn != -1 || lookupTargetTableColumn != -1 || customerTargetTablesColumn != -1 ||
+                    tableDisplayCollectionNameColumn != -1 || descriptionColumn != -1 || requiredColumn != -1 || includeColumn != -1)
                 {
                     _logger.LogDebug(
-                        "Found optional columns - LogicalName: {LogicalCol}, TableLogicalName: {TableLogicalCol}, " +
-                        "TableDisplayCollection: {TableDisplayCol}, Description: {DescCol}, Required: {ReqCol}",
-                        logicalNameColumn != -1 ? logicalNameColumn.ToString() : "Not found",
-                        tableLogicalNameColumn != -1 ? tableLogicalNameColumn.ToString() : "Not found",
+                        "Found optional columns - Choice: {ChoiceCol}, LookupTarget: {LookupCol}, CustomerTargets: {CustomerCol}, " +
+                        "TableDisplayCollection: {TableDisplayCol}, Description: {DescCol}, Required: {ReqCol}, Include: {IncludeCol}",
+                        choiceOptionsColumn != -1 ? choiceOptionsColumn.ToString() : "Not found",
+                        lookupTargetTableColumn != -1 ? lookupTargetTableColumn.ToString() : "Not found",
+                        customerTargetTablesColumn != -1 ? customerTargetTablesColumn.ToString() : "Not found",
                         tableDisplayCollectionNameColumn != -1 ? tableDisplayCollectionNameColumn.ToString() : "Not found",
                         descriptionColumn != -1 ? descriptionColumn.ToString() : "Not found",
-                        requiredColumn != -1 ? requiredColumn.ToString() : "Not found");
+                        requiredColumn != -1 ? requiredColumn.ToString() : "Not found",
+                        includeColumn != -1 ? includeColumn.ToString() : "Not found");
                 }
 
                 if (worksheet.Dimension == null)
@@ -221,20 +240,48 @@ namespace DataverseSchemaManager.Services
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    var tableName = worksheet.Cells[row, tableNameColumn].Text?.Trim();
-                    var columnName = worksheet.Cells[row, columnNameColumn].Text?.Trim();
-                    var columnType = worksheet.Cells[row, columnTypeColumn].Text?.Trim();
+                    // Check include column filter (if configured)
+                    if (includeColumn != -1)
+                    {
+                        var includeValue = worksheet.Cells[row, includeColumn].Text?.Trim();
+                        if (!IsIncluded(includeValue))
+                        {
+                            continue;
+                        }
+                    }
+
+                    // Required columns - Logical names
+                    var logicalName = worksheet.Cells[row, logicalNameColumn].Text?.Trim();
+                    var tableLogicalName = worksheet.Cells[row, tableLogicalNameColumn].Text?.Trim();
+
+                    // Skip row if any required field is empty
+                    if (string.IsNullOrEmpty(logicalName) || string.IsNullOrEmpty(tableLogicalName))
+                    {
+                        continue;
+                    }
+
+                    // Optional columns - Display names (for creation)
+                    var tableName = tableNameColumn != -1 ? worksheet.Cells[row, tableNameColumn].Text?.Trim() : null;
+                    var columnName = columnNameColumn != -1 ? worksheet.Cells[row, columnNameColumn].Text?.Trim() : null;
+                    var columnType = columnTypeColumn != -1 ? worksheet.Cells[row, columnTypeColumn].Text?.Trim() : null;
+
+                    // Optional columns - Choice fields
                     var choiceOptions = choiceOptionsColumn != -1
                         ? worksheet.Cells[row, choiceOptionsColumn].Text?.Trim()
                         : null;
 
-                    // Phase 1 optional columns
-                    var logicalName = logicalNameColumn != -1
-                        ? worksheet.Cells[row, logicalNameColumn].Text?.Trim()
+                    // Optional columns - Lookup/Customer fields
+                    var lookupTargetTable = lookupTargetTableColumn != -1
+                        ? worksheet.Cells[row, lookupTargetTableColumn].Text?.Trim()
                         : null;
-                    var tableLogicalName = tableLogicalNameColumn != -1
-                        ? worksheet.Cells[row, tableLogicalNameColumn].Text?.Trim()
+                    var lookupRelationshipName = lookupRelationshipNameColumn != -1
+                        ? worksheet.Cells[row, lookupRelationshipNameColumn].Text?.Trim()
                         : null;
+                    var customerTargetTables = customerTargetTablesColumn != -1
+                        ? worksheet.Cells[row, customerTargetTablesColumn].Text?.Trim()
+                        : null;
+
+                    // Optional columns - Metadata
                     var tableDisplayCollectionName = tableDisplayCollectionNameColumn != -1
                         ? worksheet.Cells[row, tableDisplayCollectionNameColumn].Text?.Trim()
                         : null;
@@ -245,21 +292,21 @@ namespace DataverseSchemaManager.Services
                         ? worksheet.Cells[row, requiredColumn].Text?.Trim()
                         : null;
 
-                    if (!string.IsNullOrEmpty(tableName) && !string.IsNullOrEmpty(columnName) && !string.IsNullOrEmpty(columnType))
+                    schemas.Add(new SchemaDefinition
                     {
-                        schemas.Add(new SchemaDefinition
-                        {
-                            TableName = tableName,
-                            ColumnName = columnName,
-                            ColumnType = columnType,
-                            ChoiceOptions = choiceOptions,
-                            LogicalName = logicalName,
-                            TableLogicalName = tableLogicalName,
-                            TableDisplayCollectionName = tableDisplayCollectionName,
-                            Description = description,
-                            Required = required
-                        });
-                    }
+                        TableName = tableName,
+                        ColumnName = columnName,
+                        ColumnType = columnType,
+                        LogicalName = logicalName,
+                        TableLogicalName = tableLogicalName,
+                        ChoiceOptions = choiceOptions,
+                        LookupTargetTable = lookupTargetTable,
+                        LookupRelationshipName = lookupRelationshipName,
+                        CustomerTargetTables = customerTargetTables,
+                        TableDisplayCollectionName = tableDisplayCollectionName,
+                        Description = description,
+                        Required = required
+                    });
                 }
 
                 _logger.LogInformation("Successfully read {Count} schema definitions from Excel", schemas.Count);
@@ -282,6 +329,17 @@ namespace DataverseSchemaManager.Services
 
             _logger.LogWarning("Column '{ColumnName}' not found in Excel file", columnName);
             return -1;
+        }
+
+        private bool IsIncluded(string? includeValue)
+        {
+            if (string.IsNullOrWhiteSpace(includeValue))
+            {
+                return false;
+            }
+
+            var normalized = includeValue.Trim().ToLowerInvariant();
+            return normalized == "yes" || normalized == "y" || normalized == "true" || normalized == "1";
         }
     }
 }

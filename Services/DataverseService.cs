@@ -99,9 +99,9 @@ namespace DataverseSchemaManager.Services
 
             _logger.LogInformation("Checking existence of {Count} schema definitions across {TableCount} tables",
                 schemas.Count,
-                schemas.Select(s => s.TableName.ToLower()).Distinct().Count());
+                schemas.Select(s => s.TableLogicalName.ToLower()).Distinct().Count());
 
-            var groupedByTable = schemas.GroupBy(s => s.TableName.ToLower());
+            var groupedByTable = schemas.GroupBy(s => s.TableLogicalName.ToLower());
 
             foreach (var tableGroup in groupedByTable)
             {
@@ -139,17 +139,17 @@ namespace DataverseSchemaManager.Services
 
                 foreach (var schema in tableSchemas)
                 {
-                    var columnExists = existingAttributes.Contains(schema.ColumnName.ToLower());
+                    var columnExists = existingAttributes.Contains(schema.LogicalName.ToLower());
                     schema.TableExistsInDataverse = true;
                     schema.ColumnExistsInDataverse = columnExists;
 
                     if (columnExists)
                     {
-                        _logger.LogDebug("Column '{Table}.{Column}' exists", tableName, schema.ColumnName);
+                        _logger.LogDebug("Column '{Table}.{Column}' exists", tableName, schema.LogicalName);
                     }
                     else
                     {
-                        _logger.LogDebug("Column '{Table}.{Column}' does not exist (will be created)", tableName, schema.ColumnName);
+                        _logger.LogDebug("Column '{Table}.{Column}' does not exist (will be created)", tableName, schema.LogicalName);
                     }
                 }
             }
@@ -266,11 +266,59 @@ namespace DataverseSchemaManager.Services
         private async Task CreateColumnAsync(SchemaDefinition schema, string tableName, string publisherPrefix, string solutionName, CancellationToken cancellationToken)
         {
             var attributeMetadata = CreateAttributeMetadata(schema, publisherPrefix);
+            var columnType = schema.ColumnType.Trim().ToLower();
 
-            var request = new CreateAttributeRequest
+            // For lookup and customer columns, we need to create the relationship
+            if (columnType.StartsWith("lookup"))
             {
-                EntityName = tableName,
-                Attribute = attributeMetadata,
+                await CreateLookupColumnWithRelationshipAsync(schema, tableName, attributeMetadata as LookupAttributeMetadata, publisherPrefix, solutionName, cancellationToken);
+            }
+            else if (columnType.StartsWith("customer"))
+            {
+                await CreateCustomerColumnWithRelationshipAsync(schema, tableName, attributeMetadata as LookupAttributeMetadata, publisherPrefix, solutionName, cancellationToken);
+            }
+            else
+            {
+                // Standard column creation
+                var request = new CreateAttributeRequest
+                {
+                    EntityName = tableName,
+                    Attribute = attributeMetadata,
+                    SolutionUniqueName = solutionName
+                };
+
+                await _retryPolicy.ExecuteAsync(async () =>
+                {
+                    return await Task.Run(() =>
+                        _serviceClient!.Execute(request),
+                        cancellationToken);
+                });
+            }
+        }
+
+        private async Task CreateLookupColumnWithRelationshipAsync(SchemaDefinition schema, string sourceTable, LookupAttributeMetadata? lookupAttribute, string publisherPrefix, string solutionName, CancellationToken cancellationToken)
+        {
+            if (lookupAttribute == null || string.IsNullOrWhiteSpace(schema.LookupTargetTable))
+            {
+                throw new InvalidOperationException("Invalid lookup configuration");
+            }
+
+            var targetTable = schema.LookupTargetTable.ToLower();
+            var relationshipName = !string.IsNullOrWhiteSpace(schema.LookupRelationshipName)
+                ? $"{publisherPrefix}_{schema.LookupRelationshipName.ToLower().Replace(" ", "_")}"
+                : $"{publisherPrefix}_{sourceTable}_{schema.LogicalName}";
+
+            var relationship = new OneToManyRelationshipMetadata
+            {
+                SchemaName = relationshipName,
+                ReferencedEntity = targetTable,
+                ReferencingEntity = sourceTable.ToLower()
+            };
+
+            var request = new CreateOneToManyRequest
+            {
+                OneToManyRelationship = relationship,
+                Lookup = lookupAttribute,
                 SolutionUniqueName = solutionName
             };
 
@@ -280,14 +328,63 @@ namespace DataverseSchemaManager.Services
                     _serviceClient!.Execute(request),
                     cancellationToken);
             });
+
+            _logger.LogInformation("Created lookup relationship '{RelationshipName}' from '{Source}' to '{Target}'",
+                relationshipName, sourceTable, targetTable);
+        }
+
+        private async Task CreateCustomerColumnWithRelationshipAsync(SchemaDefinition schema, string sourceTable, LookupAttributeMetadata? customerAttribute, string publisherPrefix, string solutionName, CancellationToken cancellationToken)
+        {
+            if (customerAttribute == null || string.IsNullOrWhiteSpace(schema.CustomerTargetTables))
+            {
+                throw new InvalidOperationException("Invalid customer configuration");
+            }
+
+            var targetTables = schema.CustomerTargetTables.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            if (targetTables.Length == 0)
+            {
+                throw new InvalidOperationException($"Customer column '{schema.ColumnName}' has no valid target tables");
+            }
+
+            // Create customer lookup with multiple target entities
+            // Note: Customer lookups typically target 'account' and 'contact'
+            var relationshipName = $"{publisherPrefix}_{sourceTable}_{schema.LogicalName}";
+
+            // For customer columns, we create a polymorphic lookup
+            // This requires creating relationships to each target table
+            foreach (var targetTable in targetTables)
+            {
+                var relationship = new OneToManyRelationshipMetadata
+                {
+                    SchemaName = $"{relationshipName}_{targetTable.ToLower()}",
+                    ReferencedEntity = targetTable.ToLower(),
+                    ReferencingEntity = sourceTable.ToLower()
+                };
+
+                var request = new CreateOneToManyRequest
+                {
+                    OneToManyRelationship = relationship,
+                    Lookup = customerAttribute,
+                    SolutionUniqueName = solutionName
+                };
+
+                await _retryPolicy.ExecuteAsync(async () =>
+                {
+                    return await Task.Run(() =>
+                        _serviceClient!.Execute(request),
+                        cancellationToken);
+                });
+
+                _logger.LogInformation("Created customer relationship '{RelationshipName}' from '{Source}' to '{Target}'",
+                    relationship.SchemaName, sourceTable, targetTable);
+            }
         }
 
         private AttributeMetadata CreateAttributeMetadata(SchemaDefinition schema, string publisherPrefix)
         {
-            // Use explicit logical name if provided, otherwise auto-generate from display name
-            var logicalNamePart = !string.IsNullOrWhiteSpace(schema.LogicalName)
-                ? schema.LogicalName.ToLower().Replace(" ", "_")
-                : schema.ColumnName.ToLower().Replace(" ", "_");
+            // Use required logical name from Excel (no auto-generation)
+            var logicalNamePart = schema.LogicalName.ToLower().Replace(" ", "_");
             var logicalName = $"{publisherPrefix}_{logicalNamePart}";
 
             var displayName = schema.ColumnName;
@@ -297,20 +394,30 @@ namespace DataverseSchemaManager.Services
             _logger.LogDebug("Creating attribute metadata for '{Column}' with type '{Type}' and logical name '{LogicalName}'",
                 schema.ColumnName, columnType, logicalName);
 
-            // Check for unsupported types first
+            // Handle lookup types
             if (columnType.StartsWith("lookup"))
             {
-                throw new NotSupportedException($"Lookup columns cannot be auto-created. Type: '{schema.ColumnType}'. Lookups require relationship metadata and must be created manually or with relationship details.");
+                if (string.IsNullOrWhiteSpace(schema.LookupTargetTable))
+                {
+                    throw new InvalidOperationException($"Lookup column '{schema.ColumnName}' requires LookupTargetTable to be specified in Excel.");
+                }
+                return CreateLookupAttribute(schema, logicalName, displayName, publisherPrefix, requiredLevel);
             }
 
+            // Handle customer types
+            if (columnType.StartsWith("customer"))
+            {
+                if (string.IsNullOrWhiteSpace(schema.CustomerTargetTables))
+                {
+                    throw new InvalidOperationException($"Customer column '{schema.ColumnName}' requires CustomerTargetTables to be specified in Excel (comma-separated, e.g., 'account,contact').");
+                }
+                return CreateCustomerAttribute(schema, logicalName, displayName, publisherPrefix, requiredLevel);
+            }
+
+            // Handle choice types
             if ((columnType == "choice" || columnType == "picklist") && string.IsNullOrEmpty(schema.ChoiceOptions))
             {
-                throw new NotSupportedException($"Choice/Picklist columns require options to be specified in the Choice Options column. Type: '{schema.ColumnType}'. Format: 'Option1;Option2;Option3' or '1:Option1;2:Option2;3:Option3'");
-            }
-
-            if (columnType == "customer")
-            {
-                throw new NotSupportedException($"Customer columns cannot be auto-created. Type: '{schema.ColumnType}'. Customer type is a special polymorphic lookup and must be created manually.");
+                throw new InvalidOperationException($"Choice/Picklist column '{schema.ColumnName}' requires options to be specified in the Choice Options column. Format: 'Option1;Option2;Option3' or '1:Option1;2:Option2;3:Option3'");
             }
 
             // Map supported types
@@ -494,6 +601,47 @@ namespace DataverseSchemaManager.Services
             };
         }
 
+        private LookupAttributeMetadata CreateLookupAttribute(SchemaDefinition schema, string logicalName, string displayName, string publisherPrefix, AttributeRequiredLevel requiredLevel)
+        {
+            if (string.IsNullOrWhiteSpace(schema.LookupTargetTable))
+            {
+                throw new ArgumentException("LookupTargetTable is required for lookup columns", nameof(schema));
+            }
+
+            var lookupAttribute = new LookupAttributeMetadata
+            {
+                SchemaName = logicalName,
+                RequiredLevel = new AttributeRequiredLevelManagedProperty(requiredLevel),
+                DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode)
+            };
+
+            _logger.LogInformation("Created lookup attribute '{LogicalName}' targeting table '{TargetTable}'",
+                logicalName, schema.LookupTargetTable);
+
+            return lookupAttribute;
+        }
+
+        private LookupAttributeMetadata CreateCustomerAttribute(SchemaDefinition schema, string logicalName, string displayName, string publisherPrefix, AttributeRequiredLevel requiredLevel)
+        {
+            if (string.IsNullOrWhiteSpace(schema.CustomerTargetTables))
+            {
+                throw new ArgumentException("CustomerTargetTables is required for customer columns", nameof(schema));
+            }
+
+            // Customer is a special lookup that can reference multiple entity types (account, contact, etc.)
+            var customerAttribute = new LookupAttributeMetadata
+            {
+                SchemaName = logicalName,
+                RequiredLevel = new AttributeRequiredLevelManagedProperty(requiredLevel),
+                DisplayName = new Label(displayName, DataverseConstants.Localization.DefaultLanguageCode)
+            };
+
+            _logger.LogInformation("Created customer attribute '{LogicalName}' targeting tables '{TargetTables}'",
+                logicalName, schema.CustomerTargetTables);
+
+            return customerAttribute;
+        }
+
         private async Task CreateTableAsync(SchemaDefinition schema, string publisherPrefix, string solutionName, CancellationToken cancellationToken)
         {
             if (_serviceClient == null || !_serviceClient.IsReady)
@@ -503,10 +651,8 @@ namespace DataverseSchemaManager.Services
 
             var tableName = schema.TableName;
 
-            // Use explicit table logical name if provided, otherwise auto-generate from table name
-            var logicalNamePart = !string.IsNullOrWhiteSpace(schema.TableLogicalName)
-                ? schema.TableLogicalName.ToLower().Replace(" ", "_")
-                : tableName.ToLower().Replace(" ", "_");
+            // Use required table logical name from Excel (no auto-generation)
+            var logicalNamePart = schema.TableLogicalName.ToLower().Replace(" ", "_");
             var schemaName = $"{publisherPrefix}_{logicalNamePart}";
 
             var displayName = tableName;
@@ -619,6 +765,145 @@ namespace DataverseSchemaManager.Services
                     _serviceClient!.Execute(publishRequest),
                     cancellationToken);
             });
+        }
+
+        /// <summary>
+        /// Validates a logical name against Dataverse naming rules.
+        /// </summary>
+        public (bool IsValid, string? ErrorMessage) ValidateLogicalName(string logicalName)
+        {
+            if (string.IsNullOrWhiteSpace(logicalName))
+            {
+                return (false, "Logical name cannot be empty");
+            }
+
+            var trimmed = logicalName.Trim();
+
+            // Must contain only lowercase alphanumeric and underscores
+            if (!System.Text.RegularExpressions.Regex.IsMatch(trimmed, "^[a-z0-9_]+$"))
+            {
+                return (false, $"Logical name '{trimmed}' contains invalid characters. Only lowercase letters, numbers, and underscores allowed.");
+            }
+
+            // Cannot start with underscore
+            if (trimmed.StartsWith("_"))
+            {
+                return (false, $"Logical name '{trimmed}' cannot start with underscore");
+            }
+
+            // Cannot end with underscore
+            if (trimmed.EndsWith("_"))
+            {
+                return (false, $"Logical name '{trimmed}' cannot end with underscore");
+            }
+
+            // Check length (Dataverse limit is typically 50 for the logical part)
+            if (trimmed.Length > 50)
+            {
+                return (false, $"Logical name '{trimmed}' exceeds maximum length of 50 characters");
+            }
+
+            return (true, null);
+        }
+
+        /// <summary>
+        /// Checks if a column schema name already exists in a table.
+        /// </summary>
+        public async Task<bool> ColumnExistsAsync(string tableName, string columnSchemaName, CancellationToken cancellationToken = default)
+        {
+            if (_serviceClient == null || !_serviceClient.IsReady)
+            {
+                throw new InvalidOperationException("Not connected to Dataverse");
+            }
+
+            try
+            {
+                var request = new RetrieveEntityRequest
+                {
+                    LogicalName = tableName.ToLower(),
+                    EntityFilters = EntityFilters.Attributes
+                };
+
+                var response = await Task.Run(() =>
+                    (RetrieveEntityResponse)_serviceClient.Execute(request),
+                    cancellationToken);
+
+                return response.EntityMetadata.Attributes
+                    .Any(a => a.LogicalName?.Equals(columnSchemaName.ToLower(), StringComparison.OrdinalIgnoreCase) == true);
+            }
+            catch (FaultException<OrganizationServiceFault> ex)
+            {
+                if (ex.Detail.ErrorCode == DataverseConstants.ErrorCodes.EntityDoesNotExist ||
+                    ex.Detail.ErrorCode == DataverseConstants.ErrorCodes.EntityNotFound)
+                {
+                    // Table doesn't exist, so column doesn't exist
+                    return false;
+                }
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Checks if a table schema name already exists.
+        /// </summary>
+        public async Task<bool> TableExistsAsync(string tableSchemaName, CancellationToken cancellationToken = default)
+        {
+            if (_serviceClient == null || !_serviceClient.IsReady)
+            {
+                throw new InvalidOperationException("Not connected to Dataverse");
+            }
+
+            try
+            {
+                var request = new RetrieveEntityRequest
+                {
+                    LogicalName = tableSchemaName.ToLower(),
+                    EntityFilters = EntityFilters.Entity
+                };
+
+                await Task.Run(() =>
+                    _serviceClient.Execute(request),
+                    cancellationToken);
+
+                return true;
+            }
+            catch (FaultException<OrganizationServiceFault> ex)
+            {
+                if (ex.Detail.ErrorCode == DataverseConstants.ErrorCodes.EntityDoesNotExist ||
+                    ex.Detail.ErrorCode == DataverseConstants.ErrorCodes.EntityNotFound)
+                {
+                    return false;
+                }
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Validates that a logical name doesn't already start with a prefix.
+        /// </summary>
+        public (bool IsValid, string? ErrorMessage) ValidatePrefixMismatch(string? explicitLogicalName, string publisherPrefix)
+        {
+            if (string.IsNullOrWhiteSpace(explicitLogicalName))
+            {
+                return (true, null); // No explicit name, will use auto-generated
+            }
+
+            var trimmed = explicitLogicalName.Trim().ToLower();
+
+            // Check if it starts with a different prefix (containing underscore suggests it might have a prefix)
+            if (trimmed.Contains("_"))
+            {
+                var parts = trimmed.Split('_', 2);
+                var potentialPrefix = parts[0];
+
+                // If the potential prefix doesn't match the publisher prefix, warn user
+                if (!potentialPrefix.Equals(publisherPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return (false, $"Logical name '{trimmed}' appears to contain prefix '{potentialPrefix}' which doesn't match publisher prefix '{publisherPrefix}'. Remove the prefix from the logical name - it will be added automatically.");
+                }
+            }
+
+            return (true, null);
         }
 
         public void Dispose()

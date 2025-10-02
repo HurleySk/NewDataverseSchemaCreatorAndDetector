@@ -78,7 +78,9 @@ namespace DataverseSchemaManager
                     // Register services
                     services.AddSingleton<IDataverseService, DataverseService>();
                     services.AddSingleton<IExcelReaderService, ExcelReaderService>();
+                    services.AddSingleton<ICsvReaderService, CsvReaderService>();
                     services.AddSingleton<ICsvExportService, CsvExportService>();
+                    services.AddSingleton<ITemplateGeneratorService, TemplateGeneratorService>();
 
                     // Register the main application
                     services.AddTransient<Application>();
@@ -94,6 +96,7 @@ namespace DataverseSchemaManager
         private readonly IDataverseService _dataverseService;
         private readonly IExcelReaderService _excelReader;
         private readonly ICsvExportService _csvExporter;
+        private readonly ITemplateGeneratorService _templateGenerator;
         private readonly ILogger<Application> _logger;
         private bool _exitRequested = false;
 
@@ -102,12 +105,14 @@ namespace DataverseSchemaManager
             IDataverseService dataverseService,
             IExcelReaderService excelReader,
             ICsvExportService csvExporter,
+            ITemplateGeneratorService templateGenerator,
             ILogger<Application> logger)
         {
             _config = config ?? throw new ArgumentNullException(nameof(config));
             _dataverseService = dataverseService ?? throw new ArgumentNullException(nameof(dataverseService));
             _excelReader = excelReader ?? throw new ArgumentNullException(nameof(excelReader));
             _csvExporter = csvExporter ?? throw new ArgumentNullException(nameof(csvExporter));
+            _templateGenerator = templateGenerator ?? throw new ArgumentNullException(nameof(templateGenerator));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
@@ -134,6 +139,16 @@ namespace DataverseSchemaManager
                 await _dataverseService.CheckSchemaExistsAsync(schemas, cancellationToken);
 
                 DisplaySchemaStatus(schemas);
+
+                // Generate CREATE template for new schemas
+                var newSchemas = schemas.Where(s => !s.ColumnExistsInDataverse).ToList();
+                if (newSchemas.Count > 0)
+                {
+                    string templatePath = _config.OutputCsvPath ?? "create_template.csv";
+                    await _templateGenerator.GenerateCreateTemplateAsync(newSchemas, templatePath, cancellationToken);
+                    Console.WriteLine($"\nCREATE template generated: {templatePath}");
+                    Console.WriteLine("Fill in the required fields (Table Name, Column Name, Column Type) and use this file to create schemas.");
+                }
 
                 await ShowMainMenuAsync(schemas, cancellationToken);
 
@@ -399,6 +414,26 @@ namespace DataverseSchemaManager
                 Console.WriteLine($"\nSolution: {solutionName}");
                 Console.WriteLine($"Publisher prefix: {publisherPrefix}");
 
+                // Validate schemas before creation
+                Console.WriteLine("\nValidating schemas...");
+                var validationErrors = await ValidateSchemasAsync(newSchemas, publisherPrefix, cancellationToken);
+
+                if (validationErrors.Any())
+                {
+                    Console.WriteLine($"\n=== VALIDATION ERRORS ({validationErrors.Count}) ===");
+                    foreach (var error in validationErrors)
+                    {
+                        Console.WriteLine($"  ✗ {error}");
+                    }
+                    Console.WriteLine("\nPlease fix the errors in your Excel file and try again.");
+                    return;
+                }
+
+                Console.WriteLine("✓ All schemas validated successfully");
+
+                // Show preview of what will be created
+                await ShowSchemaPreviewAsync(newSchemas, publisherPrefix, cancellationToken);
+
                 var missingTables = newSchemas
                     .Where(s => s.ErrorMessage?.Contains("does not exist") == true)
                     .Select(s => s.TableName.ToLower())
@@ -436,6 +471,263 @@ namespace DataverseSchemaManager
                 _logger.LogError(ex, "Error creating schemas");
                 Console.WriteLine($"Error creating schemas: {ex.Message}");
             }
+        }
+
+        private async Task<List<string>> ValidateSchemasAsync(List<SchemaDefinition> schemas, string publisherPrefix, CancellationToken cancellationToken)
+        {
+            var errors = new List<string>();
+
+            foreach (var schema in schemas)
+            {
+                // Validate required fields for CREATION
+                if (string.IsNullOrWhiteSpace(schema.TableName))
+                {
+                    errors.Add($"Table Name (display) is REQUIRED for creation. Row: Table Logical Name='{schema.TableLogicalName}'");
+                }
+
+                if (string.IsNullOrWhiteSpace(schema.ColumnName))
+                {
+                    errors.Add($"Column Name (display) is REQUIRED for creation. Row: Column Logical Name='{schema.LogicalName}'");
+                }
+
+                if (string.IsNullOrWhiteSpace(schema.ColumnType))
+                {
+                    errors.Add($"Column Type is REQUIRED for creation. Row: Column Logical Name='{schema.LogicalName}'");
+                }
+
+                // Validate required logical names are not empty
+                if (string.IsNullOrWhiteSpace(schema.LogicalName))
+                {
+                    errors.Add($"Column Logical Name is REQUIRED and cannot be empty");
+                }
+                else
+                {
+                    var (isValid, errorMessage) = _dataverseService.ValidateLogicalName(schema.LogicalName);
+                    if (!isValid)
+                    {
+                        errors.Add($"Column '{schema.ColumnName}': {errorMessage}");
+                    }
+
+                    // Check for prefix mismatch
+                    var (isPrefixValid, prefixError) = _dataverseService.ValidatePrefixMismatch(schema.LogicalName, publisherPrefix);
+                    if (!isPrefixValid)
+                    {
+                        errors.Add($"Column '{schema.ColumnName}': {prefixError}");
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(schema.TableLogicalName))
+                {
+                    errors.Add($"Table '{schema.TableName}': Table Logical Name is REQUIRED and cannot be empty");
+                }
+                else
+                {
+                    var (isValid, errorMessage) = _dataverseService.ValidateLogicalName(schema.TableLogicalName);
+                    if (!isValid)
+                    {
+                        errors.Add($"Table '{schema.TableName}': {errorMessage}");
+                    }
+
+                    // Check for prefix mismatch
+                    var (isPrefixValid, prefixError) = _dataverseService.ValidatePrefixMismatch(schema.TableLogicalName, publisherPrefix);
+                    if (!isPrefixValid)
+                    {
+                        errors.Add($"Table '{schema.TableName}': {prefixError}");
+                    }
+                }
+
+                // Validate type-specific required fields
+                if (!string.IsNullOrWhiteSpace(schema.ColumnType))
+                {
+                    var columnType = schema.ColumnType.Trim().ToLower();
+
+                    // Choice columns MUST have Choice Options
+                    if (columnType == "choice" || columnType == "picklist")
+                    {
+                        if (string.IsNullOrWhiteSpace(schema.ChoiceOptions))
+                        {
+                            errors.Add($"Column '{schema.ColumnName}': Choice Options are REQUIRED for choice/picklist columns");
+                        }
+                    }
+
+                    // Lookup columns MUST have Lookup Target Table
+                    if (columnType.StartsWith("lookup"))
+                    {
+                        if (string.IsNullOrWhiteSpace(schema.LookupTargetTable))
+                        {
+                            errors.Add($"Column '{schema.ColumnName}': Lookup Target Table is REQUIRED for lookup columns");
+                        }
+                        else
+                        {
+                            try
+                            {
+                                var targetExists = await _dataverseService.TableExistsAsync(schema.LookupTargetTable, cancellationToken);
+                                if (!targetExists)
+                                {
+                                    errors.Add($"Lookup column '{schema.ColumnName}': Target table '{schema.LookupTargetTable}' does not exist in Dataverse");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "Could not validate lookup target table: {Error}", ex.Message);
+                            }
+                        }
+                    }
+
+                    // Customer columns MUST have Customer Target Tables
+                    if (columnType.StartsWith("customer"))
+                    {
+                        if (string.IsNullOrWhiteSpace(schema.CustomerTargetTables))
+                        {
+                            errors.Add($"Column '{schema.ColumnName}': Customer Target Tables are REQUIRED for customer columns");
+                        }
+                        else
+                        {
+                            var targetTables = schema.CustomerTargetTables.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                            foreach (var targetTable in targetTables)
+                            {
+                                try
+                                {
+                                    var targetExists = await _dataverseService.TableExistsAsync(targetTable, cancellationToken);
+                                    if (!targetExists)
+                                    {
+                                        errors.Add($"Customer column '{schema.ColumnName}': Target table '{targetTable}' does not exist in Dataverse");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning(ex, "Could not validate customer target table: {Error}", ex.Message);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Build the final schema names (logical names are now required)
+                var columnLogicalName = schema.LogicalName.ToLower().Replace(" ", "_");
+                var columnSchemaName = $"{publisherPrefix}_{columnLogicalName}";
+
+                var tableLogicalName = schema.TableLogicalName.ToLower().Replace(" ", "_");
+                var tableSchemaName = $"{publisherPrefix}_{tableLogicalName}";
+
+                // Check for conflicts with existing schemas
+                if (schema.TableExistsInDataverse)
+                {
+                    // Table exists, check if column already exists
+                    try
+                    {
+                        var columnExists = await _dataverseService.ColumnExistsAsync(schema.TableName, columnSchemaName, cancellationToken);
+                        if (columnExists)
+                        {
+                            errors.Add($"Column '{columnSchemaName}' already exists in table '{schema.TableName}'");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Could not check if column exists: {Error}", ex.Message);
+                    }
+                }
+                else
+                {
+                    // Table doesn't exist, check if table schema name conflicts
+                    try
+                    {
+                        var tableExists = await _dataverseService.TableExistsAsync(tableSchemaName, cancellationToken);
+                        if (tableExists)
+                        {
+                            errors.Add($"Table '{tableSchemaName}' already exists but was not detected during initial scan");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Could not check if table exists: {Error}", ex.Message);
+                    }
+                }
+            }
+
+            return errors;
+        }
+
+        private async Task ShowSchemaPreviewAsync(List<SchemaDefinition> schemas, string publisherPrefix, CancellationToken cancellationToken)
+        {
+            Console.WriteLine("\n=== Schema Preview (Exact Names) ===");
+
+            var groupedByTable = schemas.GroupBy(s => s.TableName.ToLower()).OrderBy(g => g.Key);
+
+            foreach (var tableGroup in groupedByTable)
+            {
+                var firstSchema = tableGroup.First();
+                var tableLogicalName = !string.IsNullOrWhiteSpace(firstSchema.TableLogicalName)
+                    ? firstSchema.TableLogicalName.ToLower().Replace(" ", "_")
+                    : firstSchema.TableName.ToLower().Replace(" ", "_");
+                var tableSchemaName = $"{publisherPrefix}_{tableLogicalName}";
+
+                var displayCollectionName = !string.IsNullOrWhiteSpace(firstSchema.TableDisplayCollectionName)
+                    ? firstSchema.TableDisplayCollectionName
+                    : $"{firstSchema.TableName}s";
+
+                if (!firstSchema.TableExistsInDataverse)
+                {
+                    Console.WriteLine($"\n[NEW TABLE] {firstSchema.TableName}");
+                    Console.WriteLine($"  Schema Name: {tableSchemaName}");
+                    Console.WriteLine($"  Display Plural: {displayCollectionName}");
+                    Console.WriteLine($"  Columns ({tableGroup.Count()}):");
+                }
+                else
+                {
+                    Console.WriteLine($"\n[EXISTING TABLE] {firstSchema.TableName}");
+                    Console.WriteLine($"  New Columns ({tableGroup.Count()}):");
+                }
+
+                foreach (var schema in tableGroup.OrderBy(s => s.ColumnName))
+                {
+                    var columnLogicalName = !string.IsNullOrWhiteSpace(schema.LogicalName)
+                        ? schema.LogicalName.ToLower().Replace(" ", "_")
+                        : schema.ColumnName.ToLower().Replace(" ", "_");
+                    var columnSchemaName = $"{publisherPrefix}_{columnLogicalName}";
+
+                    var requiredLevel = string.IsNullOrWhiteSpace(schema.Required) ? "None" : schema.Required;
+                    var description = string.IsNullOrWhiteSpace(schema.Description) ? "(no description)" : schema.Description;
+
+                    Console.WriteLine($"    • {schema.ColumnName}");
+                    Console.WriteLine($"      Schema Name: {columnSchemaName}");
+                    Console.WriteLine($"      Type: {schema.ColumnType}");
+                    Console.WriteLine($"      Required: {requiredLevel}");
+                    if (!string.IsNullOrWhiteSpace(schema.Description))
+                    {
+                        Console.WriteLine($"      Description: {description}");
+                    }
+                    if (!string.IsNullOrWhiteSpace(schema.ChoiceOptions))
+                    {
+                        Console.WriteLine($"      Options: {schema.ChoiceOptions}");
+                    }
+
+                    // Show lookup relationship information
+                    var columnType = schema.ColumnType.ToLower();
+                    if (columnType.StartsWith("lookup") && !string.IsNullOrWhiteSpace(schema.LookupTargetTable))
+                    {
+                        var relationshipName = !string.IsNullOrWhiteSpace(schema.LookupRelationshipName)
+                            ? $"{publisherPrefix}_{schema.LookupRelationshipName.ToLower().Replace(" ", "_")}"
+                            : $"{publisherPrefix}_{tableLogicalName}_{columnLogicalName}";
+
+                        Console.WriteLine($"      → References: {schema.LookupTargetTable}");
+                        Console.WriteLine($"      Relationship: {relationshipName}");
+                    }
+
+                    // Show customer relationship information
+                    if (columnType.StartsWith("customer") && !string.IsNullOrWhiteSpace(schema.CustomerTargetTables))
+                    {
+                        var relationshipName = !string.IsNullOrWhiteSpace(schema.LookupRelationshipName)
+                            ? $"{publisherPrefix}_{schema.LookupRelationshipName.ToLower().Replace(" ", "_")}"
+                            : $"{publisherPrefix}_{tableLogicalName}_{columnLogicalName}";
+
+                        Console.WriteLine($"      → References: {schema.CustomerTargetTables}");
+                        Console.WriteLine($"      Relationship: {relationshipName}_[target]");
+                    }
+                }
+            }
+
+            await Task.CompletedTask;
         }
     }
 }

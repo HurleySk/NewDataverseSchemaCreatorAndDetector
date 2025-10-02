@@ -50,5 +50,37 @@ namespace DataverseSchemaManager.Interfaces
         /// <param name="cancellationToken">Token to cancel the operation.</param>
         /// <returns>The publisher's customization prefix.</returns>
         Task<string?> GetPublisherPrefixAsync(Guid publisherId, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Validates a logical name against Dataverse naming rules.
+        /// </summary>
+        /// <param name="logicalName">The logical name to validate.</param>
+        /// <returns>Tuple indicating if valid and error message if not.</returns>
+        (bool IsValid, string? ErrorMessage) ValidateLogicalName(string logicalName);
+
+        /// <summary>
+        /// Checks if a column schema name already exists in a table.
+        /// </summary>
+        /// <param name="tableName">The table name to check.</param>
+        /// <param name="columnSchemaName">The full column schema name (including prefix).</param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>True if column exists, false otherwise.</returns>
+        Task<bool> ColumnExistsAsync(string tableName, string columnSchemaName, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Checks if a table schema name already exists.
+        /// </summary>
+        /// <param name="tableSchemaName">The full table schema name (including prefix).</param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>True if table exists, false otherwise.</returns>
+        Task<bool> TableExistsAsync(string tableSchemaName, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Validates that a logical name doesn't already contain a prefix.
+        /// </summary>
+        /// <param name="explicitLogicalName">The explicit logical name from user.</param>
+        /// <param name="publisherPrefix">The publisher prefix.</param>
+        /// <returns>Tuple indicating if valid and error message if not.</returns>
+        (bool IsValid, string? ErrorMessage) ValidatePrefixMismatch(string? explicitLogicalName, string publisherPrefix);
     }
 }
