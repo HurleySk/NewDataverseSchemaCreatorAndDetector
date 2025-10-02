@@ -166,6 +166,18 @@ namespace DataverseSchemaManager.Services
                 var columnTypeColumn = FindColumnIndex(worksheet, config.ColumnTypeColumn ?? "Column Type");
                 var choiceOptionsColumn = FindColumnIndex(worksheet, config.ChoiceOptionsColumn ?? "Choice Options");
 
+                // Phase 1 optional columns
+                var logicalNameColumn = !string.IsNullOrEmpty(config.LogicalNameColumn)
+                    ? FindColumnIndex(worksheet, config.LogicalNameColumn) : -1;
+                var tableLogicalNameColumn = !string.IsNullOrEmpty(config.TableLogicalNameColumn)
+                    ? FindColumnIndex(worksheet, config.TableLogicalNameColumn) : -1;
+                var tableDisplayCollectionNameColumn = !string.IsNullOrEmpty(config.TableDisplayCollectionNameColumn)
+                    ? FindColumnIndex(worksheet, config.TableDisplayCollectionNameColumn) : -1;
+                var descriptionColumn = !string.IsNullOrEmpty(config.DescriptionColumn)
+                    ? FindColumnIndex(worksheet, config.DescriptionColumn) : -1;
+                var requiredColumn = !string.IsNullOrEmpty(config.RequiredColumn)
+                    ? FindColumnIndex(worksheet, config.RequiredColumn) : -1;
+
                 if (tableNameColumn == -1 || columnNameColumn == -1 || columnTypeColumn == -1)
                 {
                     _logger.LogError(
@@ -186,6 +198,19 @@ namespace DataverseSchemaManager.Services
                     columnTypeColumn,
                     choiceOptionsColumn != -1 ? choiceOptionsColumn.ToString() : "Not found");
 
+                if (logicalNameColumn != -1 || tableLogicalNameColumn != -1 || tableDisplayCollectionNameColumn != -1
+                    || descriptionColumn != -1 || requiredColumn != -1)
+                {
+                    _logger.LogDebug(
+                        "Found optional columns - LogicalName: {LogicalCol}, TableLogicalName: {TableLogicalCol}, " +
+                        "TableDisplayCollection: {TableDisplayCol}, Description: {DescCol}, Required: {ReqCol}",
+                        logicalNameColumn != -1 ? logicalNameColumn.ToString() : "Not found",
+                        tableLogicalNameColumn != -1 ? tableLogicalNameColumn.ToString() : "Not found",
+                        tableDisplayCollectionNameColumn != -1 ? tableDisplayCollectionNameColumn.ToString() : "Not found",
+                        descriptionColumn != -1 ? descriptionColumn.ToString() : "Not found",
+                        requiredColumn != -1 ? requiredColumn.ToString() : "Not found");
+                }
+
                 if (worksheet.Dimension == null)
                 {
                     _logger.LogWarning("Worksheet has no dimension (empty worksheet)");
@@ -203,6 +228,23 @@ namespace DataverseSchemaManager.Services
                         ? worksheet.Cells[row, choiceOptionsColumn].Text?.Trim()
                         : null;
 
+                    // Phase 1 optional columns
+                    var logicalName = logicalNameColumn != -1
+                        ? worksheet.Cells[row, logicalNameColumn].Text?.Trim()
+                        : null;
+                    var tableLogicalName = tableLogicalNameColumn != -1
+                        ? worksheet.Cells[row, tableLogicalNameColumn].Text?.Trim()
+                        : null;
+                    var tableDisplayCollectionName = tableDisplayCollectionNameColumn != -1
+                        ? worksheet.Cells[row, tableDisplayCollectionNameColumn].Text?.Trim()
+                        : null;
+                    var description = descriptionColumn != -1
+                        ? worksheet.Cells[row, descriptionColumn].Text?.Trim()
+                        : null;
+                    var required = requiredColumn != -1
+                        ? worksheet.Cells[row, requiredColumn].Text?.Trim()
+                        : null;
+
                     if (!string.IsNullOrEmpty(tableName) && !string.IsNullOrEmpty(columnName) && !string.IsNullOrEmpty(columnType))
                     {
                         schemas.Add(new SchemaDefinition
@@ -210,7 +252,12 @@ namespace DataverseSchemaManager.Services
                             TableName = tableName,
                             ColumnName = columnName,
                             ColumnType = columnType,
-                            ChoiceOptions = choiceOptions
+                            ChoiceOptions = choiceOptions,
+                            LogicalName = logicalName,
+                            TableLogicalName = tableLogicalName,
+                            TableDisplayCollectionName = tableDisplayCollectionName,
+                            Description = description,
+                            Required = required
                         });
                     }
                 }
