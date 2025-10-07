@@ -27,7 +27,7 @@ A .NET console tool for detecting existing Dataverse schema and creating new sch
 **Optional Columns (for convenience):**
 - **Column Type** - Passes through to template (e.g., `text`, `number`, `choice`)
 - **Choice Options** - For choice detection + passes through to template
-- **Include** - Filter rows (`Yes`/`Y`/`True`/`1` to process, others skipped)
+- **Include** - Filter rows: `Yes`/`Y`/`True`/`1` = include, `No`/`N`/`False`/`0` = exclude, null/empty = include (default)
 
 **Supported File Formats:** Excel (.xlsx) or CSV
 
@@ -153,18 +153,27 @@ dotnet build
 cp appsettings.template.json appsettings.json
 ```
 
-2. Edit `appsettings.json`:
+2. Edit `appsettings.json` with your file paths, connection, and **YOUR Excel column names**:
 ```json
 {
   "ExcelFilePath": "path/to/input.xlsx",
-  "ConnectionString": "AuthType=OAuth;Username=user@org.com;Url=https://yourorg.crm.dynamics.com/;AppId=51f81489-12ee-4a9e-aaae-a2591f45987d;RedirectUri=http://localhost",
+  "ConnectionString": "AuthType=OAuth;Username=user@org.com;Url=https://yourorg.crm.dynamics.com/;AppId=51f81489-12ee-4a9e-aaae-a2591f45987d;RedirectUri=http://localhost;TokenCacheStorePath=path/to/tokencache",
   "OutputCsvPath": "create_template.csv",
 
   "TableLogicalNameColumn": "Table Logical Name",
   "LogicalNameColumn": "Column Logical Name",
-  "ChoiceOptionsColumn": "Choice Options",
   "ColumnTypeColumn": "Column Type",
-  "IncludeColumn": "Include"
+  "ChoiceOptionsColumn": "Choice Options",
+  "IncludeColumn": "Include",
+
+  "TableNameColumn": "Table Name",
+  "ColumnNameColumn": "Column Name",
+  "LookupTargetTableColumn": "Lookup Target Table",
+  "LookupRelationshipNameColumn": "Lookup Relationship Name",
+  "CustomerTargetTablesColumn": "Customer Target Tables",
+  "TableDisplayCollectionNameColumn": "Display Plural",
+  "DescriptionColumn": "Description",
+  "RequiredColumn": "Required"
 }
 ```
 
@@ -268,15 +277,57 @@ All validation happens **BEFORE** any schema creation attempts.
 
 ### Column Mappings
 
-If your Excel/CSV uses different column names, update these:
+**ALL column names are configurable** to match YOUR Excel headers. Update `appsettings.json`:
+
+**REQUIRED for detection (Phase 1):**
+- `TableLogicalNameColumn` - Column containing table logical names
+- `LogicalNameColumn` - Column containing column logical names
+
+**OPTIONAL for detection/creation:**
+- `ColumnTypeColumn` - Column containing data types
+- `ChoiceOptionsColumn` - Column containing choice/picklist options
+- `IncludeColumn` - Column for filtering rows (yes/no)
+
+**OPTIONAL for creation (Phase 2):**
+- `TableNameColumn` - Column containing table display names
+- `ColumnNameColumn` - Column containing column display names
+- `LookupTargetTableColumn` - Column containing lookup target table names
+- `LookupRelationshipNameColumn` - Column containing custom relationship names
+- `CustomerTargetTablesColumn` - Column containing customer/polymorphic target tables
+- `TableDisplayCollectionNameColumn` - Column containing table plural display names
+- `DescriptionColumn` - Column containing field descriptions
+- `RequiredColumn` - Column containing required level (None/Optional/Required)
+
+**Example:** If your Excel has "Destination Table" instead of "Table Logical Name":
+```json
+{
+  "TableLogicalNameColumn": "Destination Table"
+}
+```
+
+The app will read from whatever column names you specify. Empty string (`""`) disables that mapping.
+
+### Logging (Serilog)
+
+Logging is configured in `appsettings.json`. Default outputs to console and daily rolling log files in `logs/` directory.
 
 ```json
 {
-  "TableLogicalNameColumn": "Your Table Logical Name Header",
-  "LogicalNameColumn": "Your Column Logical Name Header",
-  "ColumnTypeColumn": "Your Type Header",
-  "ChoiceOptionsColumn": "Your Options Header",
-  "IncludeColumn": "Your Include Flag Header"
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information"
+    },
+    "WriteTo": [
+      { "Name": "Console" },
+      {
+        "Name": "File",
+        "Args": {
+          "path": "logs/dataverse-schema-.log",
+          "rollingInterval": "Day"
+        }
+      }
+    ]
+  }
 }
 ```
 
@@ -295,7 +346,7 @@ See [Dataverse connection strings](https://docs.microsoft.com/en-us/power-apps/d
 
 | Issue | Solution |
 |-------|----------|
-| **"Required columns not found"** | Ensure your Excel/CSV has "Table Logical Name" and "Column Logical Name" columns |
+| **"Required columns not found"** | Ensure your Excel/CSV has columns matching `TableLogicalNameColumn` and `LogicalNameColumn` settings in appsettings.json |
 | **"Table Name (display) is REQUIRED for creation"** | Fill in Table Name column in CREATE CSV before creating |
 | **"Choice Options are REQUIRED for choice columns"** | Add Choice Options for any choice/picklist columns |
 | **"Lookup Target Table does not exist"** | Ensure target table exists in Dataverse before creating lookup |

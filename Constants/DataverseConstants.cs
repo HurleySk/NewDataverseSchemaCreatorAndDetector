@@ -21,6 +21,11 @@ namespace DataverseSchemaManager.Constants
             public const int EntityNotFound = 31993685;
 
             /// <summary>
+            /// Error code for entity not found (ObjectDoesNotExist).
+            /// </summary>
+            public const int ObjectDoesNotExist = 32277441;
+
+            /// <summary>
             /// Error code indicating API request limit has been exceeded (throttling).
             /// </summary>
             public const int ApiLimitExceeded = -2147204784;

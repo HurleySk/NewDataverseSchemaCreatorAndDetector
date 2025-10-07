@@ -156,9 +156,10 @@ namespace DataverseSchemaManager.Services
             catch (FaultException<OrganizationServiceFault> ex)
             {
                 if (ex.Detail.ErrorCode == DataverseConstants.ErrorCodes.EntityDoesNotExist ||
-                    ex.Detail.ErrorCode == DataverseConstants.ErrorCodes.EntityNotFound)
+                    ex.Detail.ErrorCode == DataverseConstants.ErrorCodes.EntityNotFound ||
+                    ex.Detail.ErrorCode == DataverseConstants.ErrorCodes.ObjectDoesNotExist)
                 {
-                    _logger.LogWarning("Table '{TableName}' does not exist (will be created)", tableName);
+                    _logger.LogDebug("Table '{TableName}' does not exist (will be created)", tableName);
 
                     foreach (var schema in tableSchemas)
                     {

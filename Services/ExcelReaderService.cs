@@ -333,13 +333,28 @@ namespace DataverseSchemaManager.Services
 
         private bool IsIncluded(string? includeValue)
         {
+            // Null/empty means include by default
             if (string.IsNullOrWhiteSpace(includeValue))
+            {
+                return true;
+            }
+
+            var normalized = includeValue.Trim().ToLowerInvariant();
+
+            // Yes values mean include
+            if (normalized == "yes" || normalized == "y" || normalized == "true" || normalized == "1")
+            {
+                return true;
+            }
+
+            // No values mean exclude
+            if (normalized == "no" || normalized == "n" || normalized == "false" || normalized == "0")
             {
                 return false;
             }
 
-            var normalized = includeValue.Trim().ToLowerInvariant();
-            return normalized == "yes" || normalized == "y" || normalized == "true" || normalized == "1";
+            // Default to including if value is unrecognized
+            return true;
         }
     }
 }
