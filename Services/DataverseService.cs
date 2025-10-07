@@ -1,6 +1,7 @@
 using DataverseSchemaManager.Constants;
 using DataverseSchemaManager.Interfaces;
 using DataverseSchemaManager.Models;
+using DataverseSchemaManager.Utils;
 using Microsoft.Extensions.Logging;
 using Microsoft.PowerPlatform.Dataverse.Client;
 using Microsoft.Xrm.Sdk;
@@ -197,6 +198,10 @@ namespace DataverseSchemaManager.Services
             }
 
             var newSchemas = schemas.Where(s => !s.ColumnExistsInDataverse).ToList();
+
+            // Deduplicate as defense-in-depth (should already be deduplicated from reading, but ensures safety)
+            newSchemas = SchemaDeduplicationHelper.DeduplicateSchemas(newSchemas, _logger, "creation");
+
             _logger.LogInformation("Creating {Count} new schemas in solution '{Solution}'", newSchemas.Count, solutionName);
 
             var groupedByTable = newSchemas.GroupBy(s => s.TableName.ToLower());

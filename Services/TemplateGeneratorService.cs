@@ -2,6 +2,7 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using DataverseSchemaManager.Interfaces;
 using DataverseSchemaManager.Models;
+using DataverseSchemaManager.Utils;
 using Microsoft.Extensions.Logging;
 using System.Globalization;
 
@@ -29,6 +30,9 @@ namespace DataverseSchemaManager.Services
             }
 
             _logger.LogInformation("Generating CREATE template CSV with {Count} schemas to {Path}", newSchemas.Count, outputPath);
+
+            // Deduplicate before generating template to ensure no duplicate rows in output
+            newSchemas = SchemaDeduplicationHelper.DeduplicateSchemas(newSchemas, _logger, "template generation");
 
             var csvConfig = new CsvConfiguration(CultureInfo.InvariantCulture)
             {

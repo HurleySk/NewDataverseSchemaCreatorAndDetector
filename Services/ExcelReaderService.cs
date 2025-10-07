@@ -1,6 +1,7 @@
 using DataverseSchemaManager.Constants;
 using DataverseSchemaManager.Interfaces;
 using DataverseSchemaManager.Models;
+using DataverseSchemaManager.Utils;
 using Microsoft.Extensions.Logging;
 using OfficeOpenXml;
 using System;
@@ -308,6 +309,9 @@ namespace DataverseSchemaManager.Services
                         Required = required
                     });
                 }
+
+                // Deduplicate schemas to handle duplicate rows in Excel
+                schemas = SchemaDeduplicationHelper.DeduplicateSchemas(schemas, _logger, "Excel");
 
                 _logger.LogInformation("Successfully read {Count} schema definitions from Excel", schemas.Count);
 

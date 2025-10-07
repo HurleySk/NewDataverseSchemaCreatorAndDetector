@@ -2,6 +2,7 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using DataverseSchemaManager.Interfaces;
 using DataverseSchemaManager.Models;
+using DataverseSchemaManager.Utils;
 using Microsoft.Extensions.Logging;
 using System.Globalization;
 
@@ -148,6 +149,9 @@ namespace DataverseSchemaManager.Services
                     Required = required
                 });
             }
+
+            // Deduplicate schemas to handle duplicate rows in CSV
+            schemas = SchemaDeduplicationHelper.DeduplicateSchemas(schemas, _logger, "CSV");
 
             _logger.LogInformation("Successfully read {Count} schema definitions from CSV", schemas.Count);
 
